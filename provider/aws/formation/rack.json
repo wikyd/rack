@@ -90,6 +90,10 @@
       { "Condition": "RegionHasEFS" },
       { "Fn::Equals": [ { "Ref": "BuildMethod" }, "fargate" ] }
     ]},
+    "FargateBuildEfsCacheEnabled": { "Fn::And": [
+      { "Condition": "UseFargateBuild" },
+      { "Fn::Equals": [ { "Ref": "FargateBuildEfsEnabled" }, "true" ] }
+    ]},
     "CreateThirdPrivateSubnet": {"Fn::Or": [
       {"Condition": "PrivateApiAndThirdAvailabilityZoneAndHighAvailability"},
       {"Condition": "PrivateAndThirdAvailabilityZoneAndHighAvailability"}
@@ -250,6 +254,9 @@
     ] },
     "RegionHasEFSAndThirdAvailabilityZoneAndHighAvailability": {
       "Fn::And": [ { "Condition": "RegionHasEFS" }, { "Condition": "ThirdAvailabilityZone" }, { "Condition": "HighAvailability" } ]
+    },
+    "FargateBuildEfsCacheEnabledAndThirdAvailabilityZoneAndHighAvailability": {
+      "Fn::And": [ { "Condition": "FargateBuildEfsCacheEnabled" }, { "Condition": "ThirdAvailabilityZone" }, { "Condition": "HighAvailability" } ]
     },
     "SetScheduleRackScale": { "Fn::Not": [{
       "Fn::And": [
@@ -905,6 +912,17 @@
       "Type": "String",
       "Description": "How much memory should be reserved by the builder. Only used when BuildMethod is set to fargate",
       "Default": ""
+    },
+    "FargateBuildEfsEnabled": {
+      "Type": "String",
+      "Description": "Provision a dedicated EFS volume and mount it into the Fargate build task so BuildKit --mount=type=cache directives persist across builds. Only used when BuildMethod is set to fargate.",
+      "Default": "false",
+      "AllowedValues": [ "true", "false" ]
+    },
+    "FargateBuildEfsMountPath": {
+      "Type": "String",
+      "Description": "Container path at which the Fargate build EFS volume is mounted. Should match the BuildKit cache directory used by the build container image. Only used when FargateBuildEfsEnabled is true.",
+      "Default": "/var/lib/buildkit/cache"
     },
     "NoHaInstanceCount": {
       "Default": "1",
@@ -3602,6 +3620,63 @@
         "SecurityGroups": [ { "Ref": "VolumeSecurity" } ]
       }
     },
+    "BuildCacheFilesystem": {
+      "Type": "AWS::EFS::FileSystem",
+      "Condition": "FargateBuildEfsCacheEnabled",
+      "Properties": {
+        "KmsKeyId": { "Fn::If": [ "EnableSharedEFSVolumeEncryptionCond", { "Ref": "CustomerManagedKey" }, { "Ref": "AWS::NoValue" }]},
+        "Encrypted":  { "Fn::If": [ "EnableSharedEFSVolumeEncryptionCond", { "Ref": "EnableSharedEFSVolumeEncryption" }, { "Ref": "AWS::NoValue" }]},
+        "FileSystemTags": [
+          { "Key": "Name", "Value": { "Fn::Join": [ "-", [ { "Ref": "AWS::StackName" }, "build-cache" ] ] } }
+        ]
+      }
+    },
+    "BuildCacheSecurity": {
+      "DependsOn": "ApiRole",
+      "Type": "AWS::EC2::SecurityGroup",
+      "Condition": "FargateBuildEfsCacheEnabled",
+      "Properties": {
+        "GroupDescription": { "Fn::Sub": "${AWS::StackName} fargate build cache" },
+        "SecurityGroupIngress": [ {
+          "IpProtocol": "tcp",
+          "FromPort": "2049",
+          "ToPort": "2049",
+          "SourceSecurityGroupId": { "Fn::If": [ "BlankBuildInstanceSecurityGroup",
+            { "Fn::If": [ "BlankInstanceSecurityGroup", { "Ref": "InstancesSecurity" }, { "Ref": "InstanceSecurityGroup" } ] },
+            { "Ref": "BuildInstanceSecurityGroup" }
+          ] }
+        } ],
+        "Tags": [ { "Key": "Name", "Value": { "Fn::Sub": "${AWS::StackName}-build-cache" } } ],
+        "VpcId": { "Fn::If": [ "BlankExistingVpc", { "Ref": "Vpc" }, { "Ref": "ExistingVpc" } ] }
+      }
+    },
+    "BuildCacheTarget0": {
+      "Type": "AWS::EFS::MountTarget",
+      "Condition": "FargateBuildEfsCacheEnabled",
+      "Properties": {
+        "FileSystemId": { "Ref": "BuildCacheFilesystem" },
+        "SubnetId": { "Fn::If": [ "PrivateInstances", { "Ref": "SubnetPrivate0" }, { "Ref": "Subnet0" } ] },
+        "SecurityGroups": [ { "Ref": "BuildCacheSecurity" } ]
+      }
+    },
+    "BuildCacheTarget1": {
+      "Type": "AWS::EFS::MountTarget",
+      "Condition": "FargateBuildEfsCacheEnabled",
+      "Properties": {
+        "FileSystemId": { "Ref": "BuildCacheFilesystem" },
+        "SubnetId": { "Fn::If": [ "PrivateInstances", { "Ref": "SubnetPrivate1" }, { "Ref": "Subnet1" } ] },
+        "SecurityGroups": [ { "Ref": "BuildCacheSecurity" } ]
+      }
+    },
+    "BuildCacheTarget2": {
+      "Type": "AWS::EFS::MountTarget",
+      "Condition": "FargateBuildEfsCacheEnabledAndThirdAvailabilityZoneAndHighAvailability",
+      "Properties": {
+        "FileSystemId": { "Ref": "BuildCacheFilesystem" },
+        "SubnetId": { "Fn::If": [ "PrivateInstances", { "Ref": "SubnetPrivate2" }, { "Ref": "Subnet2" } ] },
+        "SecurityGroups": [ { "Ref": "BuildCacheSecurity" } ]
+      }
+    },
     "AccountEvents": {
       "Type": "AWS::SQS::Queue",
       "Properties": {
@@ -4679,6 +4754,15 @@
             },
             "ReadonlyRootFilesystem": { "Fn::If": [ "EnableContainerReadonlyRootFilesystem", "true", "false" ] },
             "Name": "build",
+            "MountPoints": [
+              { "Fn::If": [ "FargateBuildEfsCacheEnabled",
+                {
+                  "SourceVolume": "build-cache",
+                  "ContainerPath": { "Ref": "FargateBuildEfsMountPath" }
+                },
+                { "Ref": "AWS::NoValue" }
+              ] }
+            ],
             "Secrets": [{
               "Name": "PASSWORD",
               "ValueFrom": { "Fn::Sub": "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}RackApiSecret" }
@@ -4694,6 +4778,18 @@
             ]
           }
         },
+        "Volumes": [
+          { "Fn::If": [ "FargateBuildEfsCacheEnabled",
+            {
+              "Name": "build-cache",
+              "EFSVolumeConfiguration": {
+                "FilesystemId": { "Ref": "BuildCacheFilesystem" },
+                "TransitEncryption": "ENABLED"
+              }
+            },
+            { "Ref": "AWS::NoValue" }
+          ] }
+        ],
         "ExecutionRoleArn": { "Fn::GetAtt": [ "ApiRole", "Arn" ] },
         "Family": { "Fn::Sub": "${AWS::StackName}-build" },
         "TaskRoleArn": { "Fn::GetAtt": [ "ApiRole", "Arn" ] }

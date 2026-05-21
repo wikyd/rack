@@ -133,6 +133,8 @@ var paramGroups = map[string]map[string]bool{
 		"BuildMethod":                 true,
 		"BuildVolumeSize":             true,
 		"FargateBuildCpu":             true,
+		"FargateBuildEfsEnabled":      true,
+		"FargateBuildEfsMountPath":    true,
 		"FargateBuildMemory":          true,
 		"PrivateBuild":                true,
 		"PruneOlderImagesCronRunFreq": true,
