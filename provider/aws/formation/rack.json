@@ -921,8 +921,8 @@
     },
     "FargateBuildEfsMountPath": {
       "Type": "String",
-      "Description": "Container path at which the Fargate build EFS volume is mounted. Should match the BuildKit cache directory used by the build container image. Only used when FargateBuildEfsEnabled is true.",
-      "Default": "/var/lib/buildkit/cache"
+      "Description": "Container path at which the Fargate build EFS volume is mounted. Should match the cache directory used by the build container image. Only used when FargateBuildEfsEnabled is true.",
+      "Default": "/kaniko/caches"
     },
     "NoHaInstanceCount": {
       "Default": "1",
